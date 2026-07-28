@@ -13,3 +13,74 @@
 .workout-tracker-group h3 {
 	margin-top: 0;
 }
+
+/* ---------- Visualization ---------- */
+
+.workout-viz {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	padding: 12px;
+	margin: 10px 0;
+	background-color: var(--background-primary);
+}
+
+.workout-viz-controls {
+	display: flex;
+	gap: 8px;
+	align-items: center;
+	margin-bottom: 6px;
+}
+
+.workout-viz-canvas {
+	width: 100%;
+}
+
+.workout-spiral {
+	display: block;
+	width: 100%;
+	height: auto;
+	overflow: visible;
+}
+
+.workout-spiral circle {
+	transition: opacity 120ms ease;
+	cursor: default;
+}
+
+.workout-spiral g:hover circle {
+	opacity: 1;
+}
+
+.workout-viz-summary {
+	display: flex;
+	justify-content: center;
+	gap: 28px;
+	flex-wrap: wrap;
+	margin-top: 4px;
+}
+
+.workout-viz-stat {
+	text-align: center;
+}
+
+.workout-viz-stat-value {
+	font-size: 1.35em;
+	font-weight: 600;
+	color: var(--interactive-accent);
+	line-height: 1.2;
+}
+
+.workout-viz-stat-label {
+	font-size: 0.7em;
+	letter-spacing: 0.08em;
+	color: var(--text-muted);
+}
+
+.workout-viz-caption,
+.workout-viz-empty,
+.workout-viz-loading {
+	font-size: 0.78em;
+	color: var(--text-muted);
+	text-align: center;
+	margin-top: 10px;
+}
