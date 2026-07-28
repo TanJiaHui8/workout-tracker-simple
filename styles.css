@@ -1,0 +1,15 @@
+.workout-tracker-block {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	padding: 10px;
+	margin: 8px 0;
+	background-color: var(--background-secondary);
+}
+
+.workout-tracker-row select {
+	flex: 1;
+}
+
+.workout-tracker-group h3 {
+	margin-top: 0;
+}
