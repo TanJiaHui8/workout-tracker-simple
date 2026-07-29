@@ -1,7 +1,7 @@
 {
   "id": "training-volume-log",
   "name": "Training Volume Log",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "minAppVersion": "1.4.0",
   "description": "Log workouts per muscle group with drop sets, resistance bands and per-day bodyweight, then see training volume on a spiral chart.",
   "author": "Tanjiahui",
