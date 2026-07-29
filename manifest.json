@@ -1,6 +1,6 @@
 {
   "id": "workout-tracker-simple",
-  "name": "Workout Tracker",
+  "name": "Workout Tracker Simple",
   "version": "1.0.0",
   "minAppVersion": "0.15.0",
   "description": "Log workouts by muscle group, with custom exercises per group and a dropdown picker inside each workout note.",
