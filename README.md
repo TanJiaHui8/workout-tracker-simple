@@ -1,2 +1,2 @@
-# workout-tracker
-obsidian pluggin workout-tracker
+# workout-tracker-simple
+obsidian pluggin workout-tracker-simple
