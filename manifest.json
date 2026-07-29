@@ -5,6 +5,6 @@
   "minAppVersion": "0.15.0",
   "description": "Log workouts by muscle group, with custom exercises per group and a dropdown picker inside each workout note.",
   "author": "tanjiahui",
-  "authorUrl": "",
+  "authorUrl": "https://github.com/TanJiaHui8",
   "isDesktopOnly": false
 }
