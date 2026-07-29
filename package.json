@@ -1,14 +1,16 @@
 {
   "name": "training-volume-log",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Obsidian plugin for logging training volume per muscle group.",
   "main": "main.js",
   "type": "commonjs",
   "scripts": {
     "lint": "eslint main.js",
-    "test": "node test-parse.js && node test-autofill.js && node test-bands.js && node test-bodyweight.js"
+    "test": "node test-parse.js && node test-autofill.js && node test-bands.js && node test-bodyweight.js && node test-setweight.js && node test-multigroup.js && node test-isometric.js"
   },
-  "keywords": ["obsidian-plugin"],
+  "keywords": [
+    "obsidian-plugin"
+  ],
   "license": "MIT",
   "devDependencies": {
     "eslint": "^9.0.0",

@@ -1,10 +1,10 @@
 {
   "id": "workout-tracker-simple",
   "name": "Training Volume Log",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "minAppVersion": "1.4.0",
   "description": "Log workouts per muscle group with drop sets, resistance bands and per-day bodyweight, then see training volume on a spiral chart.",
   "author": "Tanjiahui",
-  "authorUrl": "https://github.com/tanjiahui8",
+  "authorUrl": "https://github.com/TanJiaHui8",
   "isDesktopOnly": false
 }

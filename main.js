@@ -8,7 +8,9 @@ const DEFAULT_SETTINGS = {
 	autoFillWeights: 'last', // 'off' | 'last' | 'default'
 	showLastReps: true, // put "last: 12" hints in the Notes column
 	bands: [], // [{ name: string, min: number, max: number }]
-	bandEstimate: 'mid' // 'low' | 'mid' | 'high' — how a band's range collapses to one number
+	bandEstimate: 'mid', // 'low' | 'mid' | 'high' — how a band's range collapses to one number
+	renameOnGroupAdd: true, // keep the filename in sync when a muscle group is added
+	isoSecondsPerRep: 3 // seconds of an isometric hold that count as one rep for volume
 };
 
 // ---------- Helpers ----------
@@ -119,6 +121,45 @@ function resolveWeightExpression(cell, context) {
 	return sawTerm ? total : null;
 }
 
+// Turn a Time cell into seconds. Accepts "45", "45s", "90 sec", "1:30", "1m30s", "2m".
+function parseDuration(cell) {
+	const raw = String(cell || '').trim().toLowerCase();
+	if (!raw) return null;
+
+	const clock = raw.match(/^(\d+):([0-5]?\d)$/);
+	if (clock) return parseInt(clock[1], 10) * 60 + parseInt(clock[2], 10);
+
+	const spelled = raw.match(/^(?:([\d.]+)\s*m(?:in)?)?\s*(?:([\d.]+)\s*s(?:ec)?)?$/);
+	if (spelled && (spelled[1] || spelled[2])) {
+		return parseFloat(spelled[1] || 0) * 60 + parseFloat(spelled[2] || 0);
+	}
+
+	const n = parseFloat(raw);
+	return Number.isFinite(n) ? n : null;
+}
+
+// Column layout used when a table has no recognisable header row.
+const DEFAULT_COLUMNS = { weight: 1, reps: 2, time: -1, notes: 3 };
+
+/**
+ * Reads a table's header row into column indices, so an isometric table
+ * ("| Set | Weight | Time | Notes |") is understood as well as a rep-based one.
+ * Returns null for rows that aren't headers.
+ */
+function headerColumns(cells) {
+	const lower = cells.map((c) => c.trim().toLowerCase());
+	if (!/^sets?$/.test(lower[0] || '')) return null;
+
+	const find = (names) => lower.findIndex((c) => names.some((n) => c === n || c.startsWith(n)));
+
+	return {
+		weight: find(['weight', 'load']),
+		reps: find(['reps', 'rep']),
+		time: find(['time', 'duration', 'hold', 'sec']),
+		notes: find(['notes', 'note'])
+	};
+}
+
 // Split a cell into drop-set segments. "25 > 20 > 15" -> ["25", "20", "15"].
 // Accepts >, →, /, comma or semicolon as separators.
 function splitDropSegments(cell) {
@@ -148,6 +189,62 @@ class MuscleGroupSuggestModal extends FuzzySuggestModal {
 
 	onChooseItem(group) {
 		this.onChoose(group);
+	}
+}
+
+// ---------- Modal: set an exercise's whole weight column ----------
+
+class WeightModal extends Modal {
+	constructor(app, plugin, sourcePath, exercise) {
+		super(app);
+		this.plugin = plugin;
+		this.sourcePath = sourcePath;
+		this.exercise = exercise;
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		new Setting(contentEl).setName(`Set weight — ${this.exercise}`).setHeading();
+
+		const input = contentEl.createEl('input');
+		input.type = 'text';
+		input.placeholder = 'e.g. 22.5, BW+8, BW-green';
+		input.addClass('workout-tracker-modal-input');
+
+		let scopeValue = 'all';
+		new Setting(contentEl).setName('Apply to').addDropdown((dd) =>
+			dd
+				.addOption('all', 'All rows')
+				.addOption('top', 'Top sets only')
+				.addOption('drops', 'Drop rows only')
+				.setValue(scopeValue)
+				.onChange((v) => (scopeValue = v))
+		);
+
+		const submit = async () => {
+			const weight = input.value.trim();
+			if (!weight) {
+				new Notice('Enter a weight first.');
+				return;
+			}
+			await this.plugin.setExerciseWeight(this.sourcePath, this.exercise, weight, scopeValue);
+			this.close();
+		};
+
+		input.addEventListener('keydown', (e) => {
+			if (e.key === 'Enter') submit();
+		});
+
+		const buttons = contentEl.createDiv({ cls: 'workout-tracker-modal-buttons' });
+		const saveBtn = buttons.createEl('button', { text: 'Apply' });
+		saveBtn.addClass('mod-cta');
+		saveBtn.addEventListener('click', submit);
+
+		window.setTimeout(() => input.focus(), 0);
+	}
+
+	onClose() {
+		this.contentEl.empty();
 	}
 }
 
@@ -288,6 +385,36 @@ class WorkoutTrackerSettingTab extends PluginSettingTab {
 			.addToggle((toggle) =>
 				toggle.setValue(this.plugin.settings.showLastReps).onChange(async (value) => {
 					this.plugin.settings.showLastReps = value;
+					await this.plugin.saveSettings();
+				})
+			);
+
+		new Setting(containerEl)
+			.setName('Seconds per rep for isometric holds')
+			.setDesc(
+				'Isometric exercises record time instead of reps. To keep one comparable volume number, a hold is converted ' +
+					'into rep-equivalents at this rate — at 3, a 45 second wall sit counts like 15 reps.'
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder('3')
+					.setValue(String(this.plugin.settings.isoSecondsPerRep))
+					.onChange(async (value) => {
+						const n = parseFloat(value);
+						this.plugin.settings.isoSecondsPerRep = Number.isFinite(n) && n > 0 ? n : 3;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName('Rename note when adding a muscle group')
+			.setDesc(
+				'A workout note can cover several muscle groups. With this on, adding one renames "Back - 2026-07-29" to ' +
+					'"Back + Forearms - 2026-07-29" and updates any links to it. Turn it off to keep the original filename.'
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.renameOnGroupAdd).onChange(async (value) => {
+					this.plugin.settings.renameOnGroupAdd = value;
 					await this.plugin.saveSettings();
 				})
 			);
@@ -467,7 +594,8 @@ class WorkoutTrackerSettingTab extends PluginSettingTab {
 			// Existing exercises for this group
 			if (group.exercises.length > 0) {
 				groupContainer.createEl('p', {
-					text: 'Boxes are: working sets, drop sets per working set (0 = none), and default weight (blank = none).',
+					text:
+						'Boxes are: working sets, drop sets per working set (0 = none), reps or time (isometric holds), and default weight (blank = none).',
 					cls: 'setting-item-description'
 				});
 			}
@@ -503,6 +631,16 @@ class WorkoutTrackerSettingTab extends PluginSettingTab {
 						text.inputEl.min = '0';
 						text.inputEl.title = 'Drop sets after each working set';
 					})
+					.addDropdown((dd) =>
+						dd
+							.addOption('reps', 'Reps')
+							.addOption('time', 'Time')
+							.setValue(exercise.type === 'time' ? 'time' : 'reps')
+							.onChange(async (value) => {
+								exercise.type = value;
+								await this.plugin.saveSettings();
+							})
+					)
 					.addText((text) => {
 						text
 							.setPlaceholder('Weight')
@@ -559,7 +697,8 @@ class WorkoutTrackerSettingTab extends PluginSettingTab {
 					name,
 					sets: this.plugin.settings.defaultSets,
 					drops: 0,
-					weight: null
+					weight: null,
+					type: 'reps'
 				});
 				await this.plugin.saveSettings();
 				this.display();
@@ -588,6 +727,41 @@ module.exports = class WorkoutTrackerPlugin extends Plugin {
 			id: 'open-workout-dashboard',
 			name: 'Open workout dashboard',
 			callback: () => this.openDashboard()
+		});
+
+		this.addCommand({
+			id: 'add-muscle-group',
+			name: 'Add a muscle group to this workout',
+			checkCallback: (checking) => {
+				const file = this.app.workspace.getActiveFile();
+				if (!file) return false;
+				if (!checking) this.promptAddGroup(file);
+				return true;
+			}
+		});
+
+		this.addCommand({
+			id: 'set-exercise-weight',
+			name: 'Set weight for every set of this exercise',
+			editorCallback: (editor, view) => {
+				// Walk back from the cursor to find the "## Exercise" heading above it
+				const cursorLine = editor.getCursor().line;
+				let exercise = null;
+				for (let i = cursorLine; i >= 0; i--) {
+					const match = editor.getLine(i).trim().match(/^##\s+(.+)$/);
+					if (match) {
+						exercise = match[1].trim();
+						break;
+					}
+				}
+
+				if (!exercise) {
+					new Notice('Put the cursor inside an exercise section first.');
+					return;
+				}
+
+				new WeightModal(this.app, this, view.file.path, exercise).open();
+			}
 		});
 
 		this.addCommand({
@@ -646,6 +820,7 @@ module.exports = class WorkoutTrackerPlugin extends Plugin {
 						: exercise;
 				if (typeof normalized.drops !== 'number') normalized.drops = 0;
 				if (normalized.weight === undefined) normalized.weight = null;
+				if (normalized.type !== 'time') normalized.type = 'reps';
 				return normalized;
 			});
 		});
@@ -694,7 +869,7 @@ module.exports = class WorkoutTrackerPlugin extends Plugin {
 
 		const content = [
 			'---',
-			`muscleGroup: "${group.name}"`,
+			`muscleGroups: [${group.name}]`,
 			`date: ${date}`,
 			`bodyweight: ${lastKnown || ''}`,
 			'---',
@@ -702,7 +877,6 @@ module.exports = class WorkoutTrackerPlugin extends Plugin {
 			`# ${group.name} - ${date}`,
 			'',
 			'```workout-tracker',
-			`muscleGroup: ${group.name}`,
 			'```',
 			''
 		].join('\n');
@@ -711,54 +885,297 @@ module.exports = class WorkoutTrackerPlugin extends Plugin {
 		await this.app.workspace.getLeaf(true).openFile(file);
 	}
 
-	renderWorkoutBlock(source, el, ctx) {
-		// Parse "muscleGroup: X" out of the code block source
-		const match = source.match(/muscleGroup:\s*(.+)/i);
-		const groupName = match ? match[1].trim() : null;
-		const group = this.settings.muscleGroups.find(
-			(g) => g.name.toLowerCase() === (groupName || '').toLowerCase()
-		);
+	/** The muscle groups a note covers, from frontmatter (or its filename for older notes). */
+	getNoteGroups(file) {
+		const cache = this.app.metadataCache.getFileCache(file);
+		const fm = (cache && cache.frontmatter) || {};
 
-		const wrapper = el.createDiv({ cls: 'workout-tracker-block' });
+		const raw = fm.muscleGroups !== undefined ? fm.muscleGroups : fm.muscleGroup;
 
-		if (!group) {
-			wrapper.createEl('p', {
-				text: groupName
-					? `No muscle group named "${groupName}" found in settings.`
-					: 'No muscle group specified. Add "muscleGroup: <name>" to this block.'
+		let groups = [];
+		if (Array.isArray(raw)) groups = raw;
+		else if (typeof raw === 'string' && raw.trim()) groups = raw.split(/\s*[+,]\s*/);
+
+		if (groups.length === 0) {
+			// Fall back to the filename: "Back + Forearms - 2026-07-29"
+			const match = file.basename.match(/^(.*?)\s*-\s*\d{4}-\d{2}-\d{2}$/);
+			if (match) groups = match[1].split(/\s*\+\s*/);
+		}
+
+		return groups.map((g) => String(g).trim()).filter((g) => g.length > 0);
+	}
+
+	/** Writes the group list to frontmatter, keeping the legacy single-value key in sync. */
+	async setNoteGroups(file, groups) {
+		if (this.app.fileManager && this.app.fileManager.processFrontMatter) {
+			await this.app.fileManager.processFrontMatter(file, (fm) => {
+				fm.muscleGroups = groups;
+				delete fm.muscleGroup;
 			});
 			return;
 		}
 
-		if (group.exercises.length === 0) {
-			wrapper.createEl('p', { text: `${group.name} has no exercises yet. Add some in settings.` });
+		const inline = `muscleGroups: [${groups.join(', ')}]`;
+		await this.app.vault.process(file, (data) => {
+			const fmMatch = data.match(/^---\n([\s\S]*?)\n---\n?/);
+			if (!fmMatch) return `---\n${inline}\n---\n\n${data}`;
+
+			let block = fmMatch[1].replace(/^muscleGroup:.*$\n?/m, '');
+			block = /^muscleGroups:.*$/m.test(block)
+				? block.replace(/^muscleGroups:.*$/m, inline)
+				: block + `\n${inline}`;
+
+			return data.replace(fmMatch[0], `---\n${block}\n---\n`);
+		});
+	}
+
+	/** Adds a muscle group to an existing workout note, renaming it to match. */
+	async addGroupToNote(file, groupName) {
+		const groups = this.getNoteGroups(file);
+
+		if (groups.some((g) => g.toLowerCase() === groupName.toLowerCase())) {
+			new Notice(`${groupName} is already part of this workout.`);
 			return;
 		}
 
-		const row = wrapper.createDiv({ cls: 'workout-tracker-row' });
+		const updated = [...groups, groupName];
+		await this.setNoteGroups(file, updated);
 
-		const select = row.createEl('select');
-		group.exercises.forEach((exercise) => {
-			const drops = exercise.drops || 0;
-			const label = drops > 0
-				? `${exercise.name} (${exercise.sets} sets + ${drops} drop${drops > 1 ? 's' : ''})`
-				: `${exercise.name} (${exercise.sets} sets)`;
-			select.createEl('option', { text: label, value: exercise.name });
-		});
+		// Keep the H1 in the body consistent with the new group list
+		const dateMatch = file.basename.match(/(\d{4}-\d{2}-\d{2})$/);
+		const date = dateMatch ? dateMatch[1] : todayString();
+		const newTitle = `${updated.join(' + ')} - ${date}`;
 
-		const addBtn = row.createEl('button', { text: 'Add exercise to log' });
+		await this.app.vault.process(file, (data) =>
+			data.replace(/^#\s+.*$/m, `# ${newTitle}`)
+		);
+
+		if (this.settings.renameOnGroupAdd) {
+			const folder = file.parent && file.parent.path ? file.parent.path : '';
+			const newPath = `${folder ? folder + '/' : ''}${sanitizeFileName(newTitle)}.md`;
+
+			if (newPath !== file.path && !this.app.vault.getAbstractFileByPath(newPath)) {
+				try {
+					await this.app.fileManager.renameFile(file, newPath);
+				} catch (e) {
+					// Rename is a convenience; the frontmatter is what actually matters
+					new Notice(`Added ${groupName}, but the note could not be renamed.`);
+					return;
+				}
+			}
+		}
+
+		new Notice(`Added ${groupName} to this workout.`);
+	}
+
+	/** Opens the picker for adding another muscle group to a note. */
+	promptAddGroup(file) {
+		const existing = this.getNoteGroups(file).map((g) => g.toLowerCase());
+		const available = this.settings.muscleGroups.filter(
+			(g) => !existing.includes(g.name.toLowerCase())
+		);
+
+		if (available.length === 0) {
+			new Notice('Every muscle group is already in this workout.');
+			return;
+		}
+
+		new MuscleGroupSuggestModal(this.app, available, (group) =>
+			this.addGroupToNote(file, group.name)
+		).open();
+	}
+
+	renderWorkoutBlock(source, el, ctx) {
+		const wrapper = el.createDiv({ cls: 'workout-tracker-block' });
+		const file = this.app.vault.getAbstractFileByPath(ctx.sourcePath);
+
+		// Groups come from the note's frontmatter; the fence's muscleGroup line is
+		// still honoured so notes made by older versions keep working.
+		let groupNames = file ? this.getNoteGroups(file) : [];
+		if (groupNames.length === 0) {
+			const match = source.match(/muscleGroups?:\s*(.+)/i);
+			if (match) groupNames = match[1].split(/\s*[+,]\s*/).map((g) => g.trim());
+		}
+
+		const groups = groupNames
+			.map((name) =>
+				this.settings.muscleGroups.find((g) => g.name.toLowerCase() === name.toLowerCase())
+			)
+			.filter(Boolean);
+
+		const controls = wrapper.createDiv({ cls: 'workout-tracker-row' });
+
+		if (groups.length === 0) {
+			wrapper.createEl('p', {
+				text:
+					groupNames.length > 0
+						? `No muscle group named "${groupNames.join(', ')}" found in settings.`
+						: 'No muscle group set for this note.'
+			});
+			if (file) this.addGroupButton(controls, file);
+			return;
+		}
+
+		// The group picker only appears once there is more than one to choose between
+		let activeGroup = groups[0];
+		const groupSelect = groups.length > 1 ? controls.createEl('select') : null;
+		if (groupSelect) {
+			groups.forEach((g) => groupSelect.createEl('option', { text: g.name, value: g.name }));
+			groupSelect.title = 'Which muscle group to add an exercise from';
+		}
+
+		const exerciseSelect = controls.createEl('select');
+
+		const fillExercises = () => {
+			exerciseSelect.empty();
+			if (activeGroup.exercises.length === 0) {
+				exerciseSelect.createEl('option', {
+					text: `${activeGroup.name} has no exercises yet`,
+					value: ''
+				});
+				return;
+			}
+			activeGroup.exercises.forEach((exercise) => {
+				const drops = exercise.drops || 0;
+				const label =
+					drops > 0
+						? `${exercise.name} (${exercise.sets} sets + ${drops} drop${drops > 1 ? 's' : ''})`
+						: `${exercise.name} (${exercise.sets} sets)`;
+				exerciseSelect.createEl('option', { text: label, value: exercise.name });
+			});
+		};
+
+		if (groupSelect) {
+			groupSelect.addEventListener('change', () => {
+				activeGroup = groups.find((g) => g.name === groupSelect.value) || groups[0];
+				fillExercises();
+			});
+		}
+		fillExercises();
+
+		const addBtn = controls.createEl('button', { text: 'Add exercise to log' });
 		addBtn.addEventListener('click', async () => {
-			const exercise = group.exercises.find((e) => e.name === select.value);
+			const exercise = activeGroup.exercises.find((e) => e.name === exerciseSelect.value);
+			if (!exercise) {
+				new Notice(`Add some exercises to ${activeGroup.name} in settings first.`);
+				return;
+			}
 			await this.appendExerciseSection(ctx.sourcePath, exercise);
 		});
 
-		const fillBtn = row.createEl('button', { text: 'Fill from last session' });
+		const fillBtn = controls.createEl('button', { text: 'Fill from last session' });
 		fillBtn.title = 'Fill blank weights (and rep hints) from the last session that logged each exercise';
 		fillBtn.addEventListener('click', async () => {
 			await this.fillBlankWeights(ctx.sourcePath);
 		});
 
+		if (file) this.addGroupButton(controls, file);
+
+		this.renderWeightControls(wrapper, exerciseSelect, ctx.sourcePath);
 		this.renderBodyweightRow(wrapper, ctx.sourcePath);
+	}
+
+	/** "+ Muscle group" button, shown in both block states. */
+	addGroupButton(controls, file) {
+		const btn = controls.createEl('button', { text: '+ Muscle group' });
+		btn.title = 'Add another muscle group to this workout';
+		btn.addEventListener('click', () => this.promptAddGroup(file));
+	}
+
+	/** "Set every set of <exercise> to <weight>" row. */
+	renderWeightControls(wrapper, exerciseSelect, sourcePath) {
+		const row = wrapper.createDiv({ cls: 'workout-tracker-row' });
+
+		const input = row.createEl('input');
+		input.type = 'text';
+		input.placeholder = 'Weight for every set';
+		input.addClass('workout-tracker-weight-input');
+		input.title = 'Accepts anything the Weight column accepts: 22.5, BW, BW+8, BW-green';
+
+		const scope = row.createEl('select');
+		scope.createEl('option', { text: 'All rows', value: 'all' });
+		scope.createEl('option', { text: 'Top sets only', value: 'top' });
+		scope.createEl('option', { text: 'Drop rows only', value: 'drops' });
+		scope.title = 'Which rows to overwrite when the exercise has drop sets';
+
+		const applyBtn = row.createEl('button', { text: 'Set all' });
+		applyBtn.addEventListener('click', async () => {
+			const weight = input.value.trim();
+			if (!weight) {
+				new Notice('Enter a weight first.');
+				return;
+			}
+			await this.setExerciseWeight(sourcePath, exerciseSelect.value, weight, scope.value);
+		});
+
+		input.addEventListener('keydown', (e) => {
+			if (e.key === 'Enter') applyBtn.click();
+		});
+	}
+
+	/**
+	 * Overwrites the Weight cell for every row of one exercise in a note.
+	 * scope: 'all' | 'top' (skip 1a/1b rows) | 'drops' (only 1a/1b rows).
+	 */
+	async setExerciseWeight(sourcePath, exerciseName, weight, scope) {
+		const file = this.app.vault.getAbstractFileByPath(sourcePath);
+		if (!file) {
+			new Notice('Could not find this note to update.');
+			return;
+		}
+
+		const content = await this.app.vault.read(file);
+		let current = null;
+		let changed = 0;
+		let cols = DEFAULT_COLUMNS;
+
+		const updated = content
+			.split('\n')
+			.map((rawLine) => {
+				const line = rawLine.trim();
+
+				const heading = line.match(/^##\s+(.+)$/);
+				if (heading) {
+					current = heading[1].trim();
+					cols = DEFAULT_COLUMNS;
+					return rawLine;
+				}
+
+				if (!current || current.toLowerCase() !== exerciseName.toLowerCase()) return rawLine;
+				if (!line.startsWith('|')) return rawLine;
+
+				const cells = line.split('|').slice(1, -1).map((c) => c.trim());
+				if (cells.length < 3) return rawLine;
+
+				const header = headerColumns(cells);
+				if (header) {
+					cols = header;
+					return rawLine;
+				}
+				if (cells.every((c) => /^:?-{2,}:?$/.test(c) || c === '')) return rawLine;
+
+				const isDrop = /^\d+\s*[a-z]$/i.test(cells[0]) || /drop/i.test(cells[0]);
+				if (scope === 'top' && isDrop) return rawLine;
+				if (scope === 'drops' && !isDrop) return rawLine;
+
+				const weightCol = cols.weight >= 0 ? cols.weight : 1;
+				if (cells[weightCol] === weight) return rawLine;
+
+				cells[weightCol] = weight;
+				changed += 1;
+
+				const widths = [3, 6, 4, 5];
+				return `| ${cells.map((c, i) => c.padEnd(widths[i] || 5)).join(' | ')} |`;
+			})
+			.join('\n');
+
+		if (changed === 0) {
+			new Notice(`No matching rows for ${exerciseName} in this note.`);
+			return;
+		}
+
+		await this.app.vault.process(file, () => updated);
+		new Notice(`Set ${changed} row${changed > 1 ? 's' : ''} of ${exerciseName} to ${weight}.`);
 	}
 
 	/** "Bodyweight: [___]" row — writes straight into this note's frontmatter. */
@@ -844,6 +1261,7 @@ module.exports = class WorkoutTrackerPlugin extends Plugin {
 		const lines = content.split('\n');
 		const rows = [];
 		let inSection = false;
+		let cols = DEFAULT_COLUMNS;
 
 		for (const rawLine of lines) {
 			const line = rawLine.trim();
@@ -851,17 +1269,29 @@ module.exports = class WorkoutTrackerPlugin extends Plugin {
 
 			if (heading) {
 				inSection = heading[1].trim().toLowerCase() === exerciseName.trim().toLowerCase();
+				cols = DEFAULT_COLUMNS;
 				continue;
 			}
 			if (!inSection || !line.startsWith('|')) continue;
 
 			const cells = line.split('|').slice(1, -1).map((c) => c.trim());
 			if (cells.length < 3) continue;
-			if (/^set$/i.test(cells[0])) continue;
-			if (cells.every((c) => /^:?-{2,}:?$/.test(c) || c === '')) continue;
-			if (!cells[1] && !cells[2]) continue; // nothing recorded on this row
 
-			rows.push({ label: cells[0], weight: cells[1], reps: cells[2] });
+			const header = headerColumns(cells);
+			if (header) {
+				cols = header;
+				continue;
+			}
+			if (cells.every((c) => /^:?-{2,}:?$/.test(c) || c === '')) continue;
+
+			const weight = cells[cols.weight >= 0 ? cols.weight : 1] || '';
+			const timeCell = cols.time >= 0 ? cells[cols.time] || '' : '';
+			const repsCell = cols.reps >= 0 ? cells[cols.reps] || '' : '';
+			const measure = timeCell || repsCell;
+
+			if (!weight && !measure) continue; // nothing recorded on this row
+
+			rows.push({ label: cells[0], weight, reps: measure, isTime: Boolean(timeCell) });
 		}
 
 		return rows;
@@ -971,11 +1401,13 @@ module.exports = class WorkoutTrackerPlugin extends Plugin {
 			}
 		}
 
+		const isTime = exercise.type === 'time';
+
 		const table = [
 			'',
 			heading,
 			'',
-			'| Set | Weight | Reps | Notes |',
+			isTime ? '| Set | Weight | Time | Notes |' : '| Set | Weight | Reps | Notes |',
 			'| --- | ------ | ---- | ----- |',
 			...rows,
 			''
@@ -1016,6 +1448,7 @@ module.exports = class WorkoutTrackerPlugin extends Plugin {
 		let current = null;
 		let rowIndex = 0;
 		let filled = 0;
+		let cols = DEFAULT_COLUMNS;
 
 		const updated = content
 			.split('\n')
@@ -1026,6 +1459,7 @@ module.exports = class WorkoutTrackerPlugin extends Plugin {
 				if (heading) {
 					current = heading[1].trim();
 					rowIndex = 0;
+					cols = DEFAULT_COLUMNS;
 					return rawLine;
 				}
 
@@ -1033,27 +1467,34 @@ module.exports = class WorkoutTrackerPlugin extends Plugin {
 
 				const cells = line.split('|').slice(1, -1).map((c) => c.trim());
 				if (cells.length < 3) return rawLine;
-				if (/^set$/i.test(cells[0])) return rawLine;
+
+				const header = headerColumns(cells);
+				if (header) {
+					cols = header;
+					return rawLine;
+				}
 				if (cells.every((c) => /^:?-{2,}:?$/.test(c) || c === '')) return rawLine;
 
 				const position = rowIndex++;
 				const history = histories.get(current);
 				if (!history) return rawLine;
 
+				const weightCol = cols.weight >= 0 ? cols.weight : 1;
+				const notesCol = cols.notes >= 0 ? cols.notes : 3;
 				let changed = false;
 
-				if (!cells[1]) {
+				if (!cells[weightCol]) {
 					const weight = this.resolveWeight({ weight: null }, history, cells[0], position, 'last');
 					if (weight) {
-						cells[1] = weight;
+						cells[weightCol] = weight;
 						changed = true;
 					}
 				}
 
-				if (cells.length > 3 && !cells[3]) {
+				if (cells.length > notesCol && !cells[notesCol]) {
 					const hint = this.resolveRepsHint(history, cells[0], position);
 					if (hint) {
-						cells[3] = hint;
+						cells[notesCol] = hint;
 						changed = true;
 					}
 				}
@@ -1087,6 +1528,18 @@ module.exports = class WorkoutTrackerPlugin extends Plugin {
 	 * Both add their volume to the day's total, but only the top set of a
 	 * drop counts toward the working-set tally.
 	 */
+	/** Maps each configured exercise name to the muscle group it belongs to. */
+	exerciseGroupMap() {
+		const map = new Map();
+		(this.settings.muscleGroups || []).forEach((group) => {
+			(group.exercises || []).forEach((exercise) => {
+				const name = typeof exercise === 'string' ? exercise : exercise.name;
+				if (name) map.set(name.trim().toLowerCase(), group.name);
+			});
+		});
+		return map;
+	}
+
 	parseVolume(content, bodyweightOverride) {
 		const bodyweight =
 			bodyweightOverride === undefined || bodyweightOverride === null
@@ -1099,12 +1552,26 @@ module.exports = class WorkoutTrackerPlugin extends Plugin {
 		const exercises = new Set();
 		let currentExercise = null;
 
+		// Volume is attributed to whichever muscle group owns the exercise, so a
+		// note covering several groups can still be filtered by one of them.
+		const groupOf = this.exerciseGroupMap();
+		let cols = DEFAULT_COLUMNS;
+		const byGroup = {};
+		const tally = (exercise, addVolume, addSet, addDrop) => {
+			const group = groupOf.get(String(exercise || '').trim().toLowerCase()) || 'Unassigned';
+			if (!byGroup[group]) byGroup[group] = { volume: 0, sets: 0, drops: 0 };
+			byGroup[group].volume += addVolume;
+			byGroup[group].sets += addSet;
+			byGroup[group].drops += addDrop;
+		};
+
 		for (const rawLine of content.split('\n')) {
 			const line = rawLine.trim();
 
 			const headingMatch = line.match(/^##\s+(.+)$/);
 			if (headingMatch) {
 				currentExercise = headingMatch[1].trim();
+				cols = DEFAULT_COLUMNS;
 				continue;
 			}
 
@@ -1112,20 +1579,30 @@ module.exports = class WorkoutTrackerPlugin extends Plugin {
 
 			const cells = line.split('|').slice(1, -1).map((c) => c.trim());
 			if (cells.length < 3) continue;
-			// Skip header row and the |---|---| separator row
-			if (/^set$/i.test(cells[0])) continue;
+
+			// A header row tells us where Weight and Reps/Time live in this table
+			const header = headerColumns(cells);
+			if (header) {
+				cols = header;
+				continue;
+			}
 			if (cells.every((c) => /^:?-{2,}:?$/.test(c) || c === '')) continue;
 
 			// "1a", "1b", or anything labelled drop is a continuation of the set above
 			const isDropRow = /^\d+\s*[a-z]$/i.test(cells[0]) || /drop/i.test(cells[0]);
 
-			const weightParts = splitDropSegments(cells[1]);
-			const repParts = splitDropSegments(cells[2]);
-			if (weightParts.length === 0 || repParts.length === 0) continue;
+			// Isometric tables measure a hold in time; everything else counts reps.
+			const timeCell = cols.time >= 0 ? cells[cols.time] : '';
+			const usingTime = Boolean(timeCell);
+			const measureCell = usingTime ? timeCell : cells[cols.reps >= 0 ? cols.reps : 2];
+
+			const weightParts = splitDropSegments(cells[cols.weight >= 0 ? cols.weight : 1]);
+			const measureParts = splitDropSegments(measureCell);
+			if (weightParts.length === 0 || measureParts.length === 0) continue;
 
 			// If one column has fewer entries than the other, its last value carries over,
 			// so "25" with "12 > 10 > 8" reads as three sets at the same weight.
-			const segments = Math.max(weightParts.length, repParts.length);
+			const segments = Math.max(weightParts.length, measureParts.length);
 
 			for (let i = 0; i < segments; i++) {
 				const weight = resolveWeightExpression(
@@ -1136,23 +1613,37 @@ module.exports = class WorkoutTrackerPlugin extends Plugin {
 						bandEstimate: this.settings.bandEstimate
 					}
 				);
-				const reps = parseFloat(repParts[Math.min(i, repParts.length - 1)]);
+
+				const rawMeasure = measureParts[Math.min(i, measureParts.length - 1)];
+
+				// A hold is converted into rep-equivalents so isometric and rep-based
+				// work land on the same scale and the summary stays comparable.
+				const reps = usingTime
+					? (() => {
+							const seconds = parseDuration(rawMeasure);
+							if (seconds === null) return NaN;
+							const perRep = this.settings.isoSecondsPerRep > 0 ? this.settings.isoSecondsPerRep : 1;
+							return seconds / perRep;
+						})()
+					: parseFloat(rawMeasure);
+
 				if (weight === null || !Number.isFinite(reps)) continue;
 				if (weight <= 0 || reps <= 0) continue;
 
-				volume += weight * reps;
+				const setVolume = weight * reps;
+				volume += setVolume;
 
-				if (i === 0 && !isDropRow) {
-					workingSets += 1;
-				} else {
-					dropSets += 1;
-				}
+				const isTopSet = i === 0 && !isDropRow;
+				if (isTopSet) workingSets += 1;
+				else dropSets += 1;
+
+				tally(currentExercise, setVolume, isTopSet ? 1 : 0, isTopSet ? 0 : 1);
 
 				if (currentExercise) exercises.add(currentExercise);
 			}
 		}
 
-		return { volume, workingSets, dropSets, exercises: Array.from(exercises) };
+		return { volume, workingSets, dropSets, byGroup, exercises: Array.from(exercises) };
 	}
 
 	/** Reads a note's logged bodyweight from frontmatter, if it has one. */
@@ -1234,16 +1725,26 @@ module.exports = class WorkoutTrackerPlugin extends Plugin {
 			const ownWeight = this.readNoteBodyweight(cache);
 			const bodyweight = ownWeight !== null ? ownWeight : this.bodyweightForDate(date, timeline);
 
-			const { volume, workingSets, dropSets, exercises } = this.parseVolume(content, bodyweight);
-			const muscleGroup = String(fm.muscleGroup || (nameMatch && nameMatch[1]) || 'Unknown').trim();
+			const { volume, workingSets, dropSets, byGroup, exercises } = this.parseVolume(
+				content,
+				bodyweight
+			);
+
+			// A note can cover several muscle groups
+			let muscleGroups = this.getNoteGroups(file);
+			if (muscleGroups.length === 0) {
+				muscleGroups = [String((nameMatch && nameMatch[1]) || 'Unknown').trim()];
+			}
 
 			sessions.push({
 				path: file.path,
 				date,
-				muscleGroup,
+				muscleGroups,
+				muscleGroup: muscleGroups[0], // kept for anything expecting a single value
 				volume,
 				workingSets,
 				dropSets,
+				byGroup,
 				exercises,
 				bodyweight,
 				bodyweightLogged: ownWeight !== null
@@ -1256,13 +1757,36 @@ module.exports = class WorkoutTrackerPlugin extends Plugin {
 
 	/** Rolls sessions up into one total-volume figure per calendar day. */
 	aggregateByDay(sessions, { muscleGroup = 'all', days = 30 } = {}) {
-		const filtered =
-			muscleGroup === 'all'
-				? sessions
-				: sessions.filter((s) => s.muscleGroup.toLowerCase() === muscleGroup.toLowerCase());
+		const wanted = muscleGroup.toLowerCase();
+		const isAll = muscleGroup === 'all';
+
+		// A session counts if it covers the group at all; when filtering, only that
+		// group's share of the volume is counted, not the whole session.
+		const filtered = isAll
+			? sessions
+			: sessions.filter((s) =>
+					(s.muscleGroups || [s.muscleGroup]).some((g) => String(g).toLowerCase() === wanted)
+				);
+
+		const share = (s) => {
+			if (isAll) return { volume: s.volume, sets: s.workingSets, drops: s.dropSets || 0 };
+
+			const entry = Object.entries(s.byGroup || {}).find(
+				([name]) => name.toLowerCase() === wanted
+			);
+			if (entry) return { volume: entry[1].volume, sets: entry[1].sets, drops: entry[1].drops };
+
+			// Nothing attributed (exercise renamed or deleted from settings): fall back
+			// to the whole session only when it's the note's sole group.
+			const groups = s.muscleGroups || [s.muscleGroup];
+			return groups.length === 1
+				? { volume: s.volume, sets: s.workingSets, drops: s.dropSets || 0 }
+				: { volume: 0, sets: 0, drops: 0 };
+		};
 
 		const byDay = new Map();
 		for (const s of filtered) {
+			const part = share(s);
 			const existing = byDay.get(s.date) || {
 				date: s.date,
 				volume: 0,
@@ -1270,10 +1794,10 @@ module.exports = class WorkoutTrackerPlugin extends Plugin {
 				drops: 0,
 				groups: new Set()
 			};
-			existing.volume += s.volume;
-			existing.sets += s.workingSets;
-			existing.drops += s.dropSets || 0;
-			existing.groups.add(s.muscleGroup);
+			existing.volume += part.volume;
+			existing.sets += part.sets;
+			existing.drops += part.drops;
+			(s.muscleGroups || [s.muscleGroup]).forEach((g) => existing.groups.add(g));
 			if (s.bodyweight && !existing.bodyweight) {
 				existing.bodyweight = s.bodyweight;
 				existing.bodyweightLogged = s.bodyweightLogged;
