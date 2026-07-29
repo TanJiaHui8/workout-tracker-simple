@@ -6,12 +6,15 @@
 	background-color: var(--background-secondary);
 }
 
-.workout-tracker-row select {
-	flex: 1;
+.workout-tracker-row {
+	display: flex;
+	gap: 8px;
+	align-items: center;
+	flex-wrap: wrap;
 }
 
-.workout-tracker-group h3 {
-	margin-top: 0;
+.workout-tracker-row select {
+	flex: 1;
 }
 
 /* ---------- Visualization ---------- */
@@ -71,6 +74,7 @@
 }
 
 .workout-viz-stat-label {
+	text-transform: uppercase;
 	font-size: 0.7em;
 	letter-spacing: 0.08em;
 	color: var(--text-muted);
@@ -83,4 +87,58 @@
 	color: var(--text-muted);
 	text-align: center;
 	margin-top: 10px;
+}
+
+.workout-tracker-bw {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-top: 8px;
+	font-size: 0.9em;
+	color: var(--text-muted);
+}
+
+.workout-tracker-bw input {
+	width: 90px;
+}
+
+.workout-tracker-bw-status {
+	font-size: 0.85em;
+	font-style: italic;
+	opacity: 0.8;
+}
+
+.workout-tracker-modal-buttons {
+	display: flex;
+	justify-content: flex-end;
+	margin-top: 12px;
+}
+
+/* ---------- Settings ---------- */
+
+.workout-tracker-group {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	padding: 10px;
+	margin-bottom: 12px;
+}
+
+.workout-tracker-num-xs {
+	width: 50px;
+}
+
+.workout-tracker-num-sm {
+	width: 60px;
+}
+
+.workout-tracker-num-md {
+	width: 70px;
+}
+
+.workout-tracker-band-name {
+	width: 130px;
+}
+
+.workout-tracker-modal-input {
+	width: 100%;
 }
